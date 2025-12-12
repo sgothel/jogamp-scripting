@@ -1,0 +1,507 @@
+
+# 02 Services - Debian 13
+All template files are .. underneath in ./etc
+
+## Stop all running services ..
+```
+/etc/init.d/apache2 stop
+/etc/init.d/sendmail stop
+/etc/init.d/dovecot stop
+/etc/init.d/mysql stop
+/etc/init.d/saslauthd stop
+```
+
+## Logging
+
+- firewall logging:
+  /etc/rsyslog.conf: firewall rules, kern.debug / kern.=!debug
+  /etc/init.d/rsyslog restart
+
+- logrotate
+  /etc/logrotate.conf: compress, 48 weeks
+  /etc/logrotate.d/rsyslog: Add /var/log/firewall and /var/log/dovecot.log
+
+## Move all users
+- mv /data/backup/home/* /home/
+- for all groups: groupadd -g GID groupname
+- for all users:  useradd -M -N -u UID -g GID username
+- for all users:  usermod -a -G GID1,GID2,.. username
+- cd /data/backup/var/spool/mail ; (check names, remove unused ..) ; mv * /var/spool/mail/
+
+## Move other stuff
+### Old Logs
+  - mv /data/backup/var/log /var/log/old_logs
+
+### MySQL (MariaDB)
+- apt-get install libmariadb-dev-compat mariadb-server mariadb-client
+- old server: backup DB
+  - run backup-mysql.sh on old server, result is e.g. backup-mysqldb-20130605162509.sql
+  - !!! strip all system-DB's (schema's) from the backup,
+    i.e. all which are not created for applications, e.g.:
+    - mysql
+    - users
+    - test
+    - `t_*`
+
+- new server: import DB
+  - get backup backup-mysqldb-20130605162509.sql
+  - /etc/init.d/mysql start
+  - backup-1: backup-mysql.sh
+  - mysql --user=root --password  < backup-mysqldb-20130605162509.sql
+  - backup-2: backup-mysql.sh
+  - mysqlcheck --user=root --password --all-databases
+
+- if things go wrong: re-install mysql
+  dpkg -P mysql-server mysql-server-5.5 mysql-server-core-5.5
+  rm -rf /var/lib/mysql/*
+  apt-get install libmariadb-dev-compat mariadb-server mariadb-client
+
+- MariaDB + ZFS Performance
+  - zfs create -o mountpoint=/var/lib/mysql -o recordsize=16K jogamp_org/mysql
+  - /etc/mysql/my.cnf -> /etc/mysql/mariadb.cnf
+    ```
+    [mysqld]
+    # sz 2GiB, max 5GiB
+    # innodb_buffer_pool_size = 2147484000
+    # innodb_buffer_pool_size_max = 5368709000
+    # sz 1GiB, max 2GiB
+    innodb_buffer_pool_size = 1073742000
+    innodb_buffer_pool_size_max = 2147484000
+
+    #
+    # * InnoDB on ZFS
+    #   https://shatteredsilicon.net/mysql-mariadb-innodb-on-zfs/
+    #
+    # innodb_log_write_ahead_size = 16384 (adjusted)
+    innodb_log_write_ahead_size = 4096
+    innodb_doublewrite = 0
+    # innodb_checksum_algorithm = none (no more supported)
+    innodb_flush_neighbors = 0
+    innodb_use_native_aio = 0
+    ```
+
+- Services
+  - mv /data/backup/srv/* /srv/
+
+## Config procmail
+copy /etc/procmailrc
+
+## Bogofilter
+- copy /etc/bogofilter.cf
+- Init empty wordlist.db:
+  - touch nope
+  - cat nope  | bogoutil -l /var/spool/bogofilter/wordlist.db
+  - rm nope
+
+## SASL2
+    /etc/sasl2/Sendmail.conf
+    /etc/default/saslauthd: start=yes
+    /etc/init.d/saslauthd start
+
+## Dovecot 2.4.1
+- features:
+  - requires ssl
+  - ipv4 / ipv6
+  - smtps
+  - pop3s
+  - sieve (tls)
+
+- Sync config files in /etc/dovecot/
+  with etc/dovecot/dovecot.conf.diff and etc/dovecot/conf.d.diff
+
+- mkdir -p /var/lib/dovecot/sieve/global/
+- chmod ugo+rx /var/lib/dovecot
+- copy /var/lib/dovecot/sieve/global/default.sieve
+    - cd /var/lib/dovecot/sieve/global ; sievec default.sieve
+- copy /var/lib/dovecot/sieve/prologue.sieve
+    - cd /var/lib/dovecot/sieve ; sievec prologue.sieve
+
+- migrate old INBOX:
+  - for each user:
+    - dsync mirror mbox:~/mail:INBOX=/var/mail/USERNAME
+    - su dstrohlein -c "dsync mirror mbox:~/mail:INBOX=/var/mail/dstrohlein ; echo OK"
+
+- /etc/init.d/dovecot start
+
+
+## Sendmail 8.18.1
+- features:
+  - requires ssl for auth
+  - ipv4 / ipv6
+
+- /etc/mail
+- Sync config files in /etc/mail with: etc/mail/mail.diff
+    - sendmail.mc
+    - submit.mc
+    - access
+    - local-host-names
+    - virtusertable
+
+- /etc
+    - aliases
+
+- cd /etc/mail
+    - make
+
+- SPF
+  - add TXT dns entry jogamp.org IN TXT "v=spf1 mx a ptr:jogamp.org ip6:2a01:4f8:192:1164::2 -all"
+
+- DKIM
+  - https://dev.kafol.net/2013/01/dkim-spf-sendmail-for-multiple-domains.html
+    ```
+    apt-get install opendkim
+    apt-get install opendkim-tools
+    vi /etc/opendkim.conf
+    mkdir /etc/opendkim/
+    mkdir /etc/opendkim/keys
+    mkdir /etc/opendkim/keys/jogamp.org
+    vi /etc/opendkim/TrustedHosts
+    vi /etc/opendkim/SigningTable
+    vi /etc/opendkim/KeyTable
+    opendkim-genkey -D /etc/opendkim/keys/jogamp.org -d jogamp.org -s default
+    chown -R opendkim:opendkim /etc/opendkim
+    chmod -R go-rwx /etc/opendkim
+    ```
+
+  - add TXT dns entry default._domainkey.jogamp.org IN TXT "v=DKIM1; k=rsa; p=PUB-KEY"
+
+- DMARC
+    - add TXT dns entry _dmarc.jogamp.org IN TXT "v=DMARC1; p=none; rua=mailto:postmaster@jogamp.org; adkim=r; aspf=r; pct=100; rf=afrf; sp=none"
+
+/etc/init.d/sendmail start
+
+## GIT
+- xinetd for git
+  ```
+  apt-get install xinetd
+  cp /etc/xinetd.d/git
+  /etc/init.d/xinetd restart
+  ```
+
+- gitweb
+  - We use deployed gitweb now, and simply deploy gitweb.conf
+    - ln -s /usr/share/gitweb DocumentRoot/git
+    - cp srv/scm/gitweb.conf
+
+## Apache2 / Webservices
+
+We setup the regular apache2 server (master)
+using mpm_event worker connecting to
+a second apache2-bugzille using mpm_prefork + mod_perl.
+
+### System attack mitigation
+  - /etc/sysctl.conf
+    ```
+    net.ipv4.tcp_syncookies=1
+    net.ipv4.tcp_max_syn_backlog=5000
+    net.ipv4.tcp_sack = 0
+    # maybe, defaults: kernel.msgmnb=8192 and kernel.msgmax=16384
+    kernel.msgmnb=16384
+    kernel.msgmax=65536
+    ```
+
+### PHP 8.4 (Debian 13)
+```
+apt install php8.4 php8.4-apcu php8.4-bcmath php8.4-bz2 php8.4-cgi php8.4-cli php8.4-common php8.4-curl php8.4-gd php8.4-gmp php8.4-imagick php8.4-intl php8.4-ldap php8.4-mbstring php8.4-mysql php8.4-opcache php8.4-phpdbg php8.4-readline php8.4-xml php8.4-zip
+```
+
+### PHP 8.2 (Debian 12)
+PHP 8.2 is required by wikimedia.
+
+```
+apt install php8.2 php8.2-apcu php8.2-bcmath php8.2-bz2 php8.2-cgi php8.2-cli php8.2-common php8.2-curl php8.2-gd php8.2-gmp php8.2-imagick php8.2-intl php8.2-ldap php8.2-mbstring php8.2-mysql php8.2-opcache php8.2-phpdbg php8.2-readline php8.2-xml php8.2-zip
+```
+
+### PHP 8.2 (Debian 13)
+PHP 8.2 is required by wikimedia through Apache2.
+
+No need to to force php8.2 to php on commandline (alternative)
+as we utilize matching runner scripts.
+
+#### Add SURY to repo 
+See [Debian Additional PHP Versions using SURY](https://wiki.debian.org/AdditionalPHPVersions)
+
+```
+cd `mktemp -d`
+wget -q https://packages.sury.org/debsuryorg-archive-keyring.deb
+dpkg -i ./debsuryorg-archive-keyring.deb
+. /etc/os-release
+cat << EOF > /etc/apt/sources.list.d/sury-php.sources
+Types: deb deb-src
+URIs: https://packages.sury.org/php
+Suites: $VERSION_CODENAME
+Components: main
+Signed-By: /usr/share/keyrings/debsuryorg-archive-keyring.gpg
+EOF
+apt-get update
+apt-cache policy php
+```
+
+#### Install Custom PHP 8.2
+```
+apt install php8.2 php8.2-apcu php8.2-bcmath php8.2-bz2 php8.2-cgi php8.2-cli php8.2-common php8.2-curl php8.2-gd php8.2-gmp php8.2-imagick php8.2-intl php8.2-ldap php8.2-mbstring php8.2-mysql php8.2-opcache php8.2-phpdbg php8.2-readline php8.2-xml php8.2-zip
+```
+
+### Generic
+- apache2 and build ..
+    apt-get install apache2 mysql-server build-essential
+
+- /etc/apache2
+    - DocumentRoot /srv/www/jogamp.org
+    - Port 80, 443
+
+    - Using mpm_event
+      - a2dismod mpm_prefork (or whatever worker is used in default)
+      - a2enmod mpm_event
+
+    - for bugzilla etc
+      - a2enmod rewrite
+      - a2enmod expires
+
+    - http2
+      - a2enmod http2
+      - mods-enabled/http2.conf
+         H2Push          off
+
+      - ln -s /etc/apache2/sites-available/jogamp_org-ssl-bugzilla_redir.conf /etc/apache2/sites-enabled/001-jogamp_org-ssl.conf
+      - /etc/apache2/sites-enabled/001-jogamp_org-ssl.conf
+         <VirtualHost *:443>
+         Protocols h2 http/1.1
+
+    - attack
+      - /etc/apache2/apache2.conf
+        #Timeout 60 (default)
+        Timeout 10
+        KeepAlive On
+        MaxKeepAliveRequests 100 (default)
+        KeepAliveTimeout 5
+        #KeepAliveTimeout 10 (maybe OK)
+        ListenBackLog 5000
+
+- /etc/apache2-bugzilla
+    - DocumentRoot /srv/www/bugzilla.jogamp.org
+    - Port 8081
+
+    - copy instance
+      - cp -a etc/apache2-bugzilla /etc/apache2-bugzilla
+
+    - Using mpm_prefork (do the tasks manually w/o a2* commands)
+      - a2dismod mpm_event (or whatever worker is used in default)
+      - a2enmod mpm_prefork
+
+    - http2 (do the tasks manually w/o a2* commands)
+      - a2enmod http2
+      - mods-enabled/http2.conf
+         H2Push          off
+
+      - ln -s /etc/apache2-bugzilla/sites-available/jogamp_org.conf /etc/apache2-bugzilla/sites-enabled/001-jausoft_com-ssl.conf
+      - sites-enabled/001-jausoft_com-ssl.conf
+         <VirtualHost *:443>
+         Protocols h2 http/1.1
+
+    - attack (see above)
+
+    - enable for systemd
+      - cp scripts/apache2-bugzilla.service /usr/lib/systemd/system/apache2-bugzilla.service
+      - systemctl enable apache2-bugzilla
+      - systemctl start apache2-bugzilla
+
+## Bugzilla
+
+### System prepare
+```
+apt-get install libapache2-mod-perl2-dev libapache2-mod-perl2
+apt-get install libmariadb-dev-compat mariadb-server mariadb-client
+apt-get install libgd-dev libgd3
+apt install libgdbm-dev libgdbm6
+```
+
+### Bugzilla source install
+- cd /srv/www/bugzilla.jogamp.org
+- chown -R user:user .
+- as user
+  - git clone https://github.com/bugzilla/bugzilla bugzilla-git
+  - git checkout --track -b release-5.2-stable origin/release-5.2-stable
+  - ./checksetup.pl
+  - rm -rf lib
+  - /usr/bin/perl install-module.pl --all
+  - #/usr/bin/perl install-module.pl --upgrade-all
+  - ./checksetup.pl --check-modules
+  - ./checksetup.pl
+- chown -R webrunner:webrunner .
+- systemctl restart apache2-bugzilla
+
+### Bugzilla upgrade
+- prep bugzilla
+  - set parameters shutdown
+  - backup database
+- cd bugzilla
+- chown -R user:user .
+- as user
+  - we use git remote https://github.com/bugzilla/bugzilla
+  - git status
+    - ensure all your local changes are committed for later?
+    - or squash your local changes
+  - git fetch --all
+  - git checkout --track -b release-5.2-stable origin/release-5.2-stable
+
+  - ./checksetup.pl
+    rm -rf lib
+    /usr/bin/perl install-module.pl --all
+    #/usr/bin/perl install-module.pl --upgrade-all
+    ./checksetup.pl --check-modules
+
+    # for bugzilla upgrade to 5.2 / mariadb
+    ./contrib/recode.pl --guess --charset=utf8
+
+    ./checksetup.pl
+- chown -R webrunner:webrunner .
+
+
+## Mediawiki
+- https://www.mediawiki.org/wiki/Download
+
+- Vector skin (default):
+    vi wiki/skins/Vector/variables.less
+        // @html-font-size: 100%;
+        @html-font-size: 95%;
+
+- git install
+  - cd <webroot>
+  - chown -R user:user .
+  - git clone --recurse-submodules https://gerrit.wikimedia.org/r/mediawiki/core.git mediawiki-git
+  - ln -s mediawiki-git wiki
+  - Edit LocalSettings.php
+  - chown -R webrunner:webrunner .
+  - chmod 400 LocalSettings.php
+
+- Caching Setup in LocalSettings.php
+    $wgUseFileCache = true; // default: false
+    $wgFileCacheDirectory = "$IP/images/cache"; // default: "{$wgUploadDirectory}/cache" which equals to "$IP/images/cache"
+
+    ## Shared memory settings
+    $wgMainCacheType = CACHE_ACCEL;
+    $wgMemCachedServers = array();
+
+- Bugzilla Extension
+ - https://github.com/mozilla/mediawiki-bugzilla
+   - was: https://github.com/nakal/mediawiki-bugzillareports
+ - See also
+   - https://www.mediawiki.org/wiki/Extension:Bugzilla_Reports
+   - https://www.mediawiki.org/wiki/Extension_talk:Bugzilla_Reports#Google_Code_Shutting_Down
+  - cd extensions
+  - git pull https://github.com/mozilla/mediawiki-bugzilla Bugzilla
+
+### Mediawiki upgrade
+- cd wiki
+- chown -R user:user .
+- as user
+  - Bugzilla https://github.com/mozilla/mediawiki-bugzilla
+    - cd extensions/Bugzilla
+    - if moving from master to main
+      - git checkout --track -b main origin/main
+    - git pull
+    - Patch for MediaWiki 1.41
+      - Apply commit-c99dc10-wiki1_41-01.patch
+        - git checkout -b wiki_fix_1_41
+        - git am commit-c99dc10-wiki1_41-01.patch
+
+  - we use git remote https://gerrit.wikimedia.org/r/mediawiki/core.git
+  - git status
+    - ensure all your local changes are committed for later?
+    - or squash your local changes
+  - git fetch --all
+
+  - See upgrade script in scripts/wiki_toversion.sh
+    - scripts/wiki_toversion.sh REL1_42
+    - scripts/wiki_toversion.sh REL1_43
+    - scripts/wiki_toversion.sh REL1_44
+
+  - Upgrade to 1.40
+    - git checkout --track -b REL1_40 origin/REL1_40
+    - git submodule update --recursive
+    - **** DISABLE ALL Skins but Vector ****
+    - php8.2 maintenance/run.php update
+    - chown -R webrunner:webrunner .
+
+  ...
+
+  - Upgrade to 1.41
+    - git checkout --track -b REL1_41 origin/REL1_41
+    - git submodule update --recursive
+    - **** Apply Bugzilla, see above ****
+    - php maintenance/runScript.php maintenance/update.php
+    - chown -R webrunner:webrunner .
+
+  ...
+
+  - Upgrade to 1.44
+    - git checkout --track -b REL1_44 origin/REL1_44
+    - git submodule update --recursive
+    - php8.2 maintenance/run.php update
+    - chown -R webrunner:webrunner .
+
+- chown -R webrunner:webrunner .
+- chmod 400 LocalSettings.php
+
+## Apache misc
+    - Sync config files in /etc/apache2/ with: etc/apache2/apache2.diff
+        - see also etc/apache2/mods-enabled.lst, etc ..
+
+    /etc/init.d/apache2 start
+
+## jogamp_web daemons ..
+
+### Crontab
+```
+# m h  dom mon dow   command
+51  *    *   *   *   /bin/bash /home/jogamp_web/jogamp.org/planet2/update-planet.sh >& /dev/null
+52  *    *   *   *   /bin/bash /home/jogamp_web/jogamp.org/planet2/update-stream.sh >& /dev/null
+10 23    *   *   *   /bin/bash /home/jogamp_web/awstats/awstats-start.sh >& /dev/null
+```
+
+### Awstats (no more used):
+    user: jogamp_web
+    script home:  /home/jogamp_web/awstats
+    install home: /home/jogamp_web/awstats/installation
+        root@server:
+            apt-get install libgeoip-dev libgeo-ip-perl php5-geoip python-geoip geoip-database libnet-whois-raw-perl
+            mkdir /var/lib/awstats/
+            chown -R jogamp_web:jogamp_web /var/lib/awstats/
+            chown -R jogamp_web:jogamp_web /etc/GeoIP
+
+        jogamp_web@server:
+            cd /home/jogamp_web/awstats
+            wget http://prdownloads.sourceforge.net/awstats/awstats-7.1.1.tar.gz
+            tar xzf awstats-7.1.1.tar.gz
+            ln -s awstats-7.1.1 installation
+            mkdir config
+            mkdir log
+
+            cp -a BACKUP/awstats/awstats.jogamp.org.conf /home/jogamp_web/awstats/config
+            cp -a BACKUP/awstats/awstats-start.sh /home/jogamp_web/awstats/
+
+            cp -a BACKUP etc/logrotate.d/httpd-prerotate /etc/logrotate.d/
+                this kicks off /home/jogamp_web/awstats/awstats-start.sh before the logrotate
+
+        Populate /etc/GeoIP ..
+
+### jabot (no more used)
+    As user jabot:
+        cd /srv/jabot ; git clone file:///srv/scm/users/sgothel/jabot.git
+        cd jabot ; ant
+
+    As user root:
+        cp -a /srv/jabot/jabot/scripts/jabot-init-debian /etc/init.d/jabot
+        update-rc.d jabot defaults
+
+### Jenkins
+as root@jogamp.org:
+```
+apt-get install graphviz-dev graphviz
+cp ../../../jenkins-server-slave-setup/scripts/jenkins-initd-debian /etc/init.d/jenkins
+cp ../../../jenkins-server-slave-setup/scripts/jenkins.logrotate /etc/logrotate.d/
+update-rc.d jenkins defaults
+/etc/init.d/jenkins start
+```
+
