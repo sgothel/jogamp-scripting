@@ -86,12 +86,69 @@ All template files are .. underneath in ./etc
 ## Config procmail
 copy /etc/procmailrc
 
-## Bogofilter
+## Bogofilter (obsolete, using spamassassin)
 - copy /etc/bogofilter.cf
 - Init empty wordlist.db:
   - touch nope
   - cat nope  | bogoutil -l /var/spool/bogofilter/wordlist.db
   - rm nope
+
+## Spamassassin
+Using `spamd` of under the `debian-spamd` (Debian 13)
+and ensuring to use a global common home-dir under `debian-spamd` ownership.
+
+### Install and stop
+```
+apt-get --install-recommends install spamassassin
+systemctl stop spamd.service
+```
+
+### Configuration
+vi /etc/default/spamd
+```
+# changed:
+OPTIONS="--create-prefs --max-children 5 --helper-home-dir=/var/lib/spamassassin -u debian-spamd --syslog=/var/log/spamassassin/spamd.log"
+
+# default:
+PIDFILE="/var/run/spamd.pid"
+NICE="--nicelevel 15"
+```
+
+vi /etc/default/spamassassin
+```
+# changed:
+OPTIONS="--create-prefs --max-children 5 --helper-home-dir=/var/lib/spamassassin -u debian-spamd --syslog=/var/log/spamassassin/spamd.log"
+CRON=1
+
+# default:
+PIDFILE="/var/run/spamd.pid"
+NICE="--nicelevel 15"
+```
+
+Setup logging and logrotate
+```
+mkdir /var/log/spamassassin && sudo chown debian-spamd:debian-spamd /var/log/spamassassin
+```
+
+vi /etc/logrotate.d/spamassassin
+```
+/var/log/spamassassin/spamd.log {
+      copytruncate
+      rotate 12
+      weekly
+      compress
+      missingok
+      postrotate
+        /bin/systemctl restart spamd.service > /dev/null
+      endscript
+}
+```
+
+### Launch
+```
+/etc/cron.daily/spamassassin
+systemctl enable spamd.service && systemctl start spamd.service
+```
 
 ## SASL2
     /etc/sasl2/Sendmail.conf
